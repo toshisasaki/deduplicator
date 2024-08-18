@@ -11,7 +11,7 @@ RUN microdnf install -y \
     openssl-devel \
     rust
 
-# build rust-keylime
+# build
 RUN git clone https://github.com/toshisasaki/deduplicator /src/deduplicator
 WORKDIR /src/deduplicator
 RUN ls -la && cargo build --release
@@ -39,11 +39,11 @@ LABEL version="$VERSION"
 LABEL license="Apache-2.0"
 LABEL vendor="Anderson Toshiyuki Sasaki"
 
-# Install all agent runtime dependencies
+# Install runtime dependencies
 RUN microdnf makecache && \
-    microdnf -y install openssl util-linux-core && \
+    microdnf -y install openssl && \
     microdnf clean all && \
     rm -rf /var/cache/dnf/*
 
-# now copy the agent from the builder
+# now copy the deduplicator from the builder
 COPY --from=builder /src/deduplicator/target/release/deduplicator /bin/deduplicator
