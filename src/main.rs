@@ -23,10 +23,10 @@ fn process_file(path: PathBuf) -> Option<(String, String)> {
         Err(_) => return None,
     };
 
-    let mut reader = BufReader::with_capacity(4 * 1024 * 1024, file); // 4MB buffer
+    let mut reader = BufReader::with_capacity(256 * 1024 * 1024, file); // 256MB buffer
     let mut hasher = Sha1::new();
 
-    let mut buffer = vec![0; 4 * 1024 * 1024]; // 4MB buffer
+    let mut buffer = vec![0; 256 * 1024 * 1024]; // 256MB buffer
     loop {
         let bytes_read = match reader.read(&mut buffer) {
             Ok(0) => break, // EOF reached
