@@ -1,69 +1,77 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use serde::{Serialize, Deserialize};
 use serde_json::json;
 use openssl::sha::Sha1;
-use walkdir::WalkDir;
-use tokio::task;
-use futures::stream::{self, StreamExt};
 use clap::{Arg, Command, ArgAction};
-use num_cpus;
+use walkdir::WalkDir;
+use rayon::prelude::*;
 
+/// Struct for holding duplicate file information
 #[derive(Serialize, Deserialize, Debug)]
 struct DuplicateFiles {
     hash: String,
     paths: Vec<String>,
 }
 
-async fn process_file(path: PathBuf) -> Option<(String, String)> {
-    let mut file = match File::open(&path) {
+/// Process a file to compute its SHA-1 hash
+fn process_file(path: PathBuf) -> Option<(String, String)> {
+    let file = match File::open(&path) {
         Ok(file) => file,
         Err(_) => return None,
     };
 
-    let mut contents = Vec::new();
-    if file.read_to_end(&mut contents).is_err() || contents.is_empty() {
-        return None;
+    let mut reader = BufReader::with_capacity(4 * 1024 * 1024, file); // 4MB buffer
+    let mut hasher = Sha1::new();
+
+    let mut buffer = vec![0; 4 * 1024 * 1024]; // 4MB buffer
+    loop {
+        let bytes_read = match reader.read(&mut buffer) {
+            Ok(0) => break, // EOF reached
+            Ok(bytes) => bytes,
+            Err(_) => return None,
+        };
+
+        hasher.update(&buffer[..bytes_read]);
     }
 
-    let mut hasher = Sha1::new();
-    hasher.update(&contents);
     let hash = hasher.finish();
     let hash_hex = hex::encode(hash);
 
     Some((hash_hex, path.to_string_lossy().to_string()))
 }
 
-async fn find_duplicates(input_dir: &str) -> io::Result<Vec<DuplicateFiles>> {
-    let mut file_futures = Vec::new();
-
-    for entry in WalkDir::new(input_dir)
-        .follow_links(true)
+/// Find duplicates in the specified directory
+fn find_duplicates(input_dir: &str) -> io::Result<Vec<DuplicateFiles>> {
+    // Collect file paths from directory traversal
+    let entries: Vec<_> = WalkDir::new(input_dir)
         .into_iter()
         .filter_map(Result::ok)
-        .filter(|e| e.metadata().map(|m| m.is_file()).unwrap_or(false))
-    {
-        let path = entry.path().to_path_buf();
-        file_futures.push(task::spawn(process_file(path)));
-    }
+        .filter(|entry| entry.file_type().is_file())
+        .filter_map(|entry| {
+            let path = entry.path().to_path_buf();
+            match fs::metadata(&path) {
+                Ok(metadata) if metadata.len() > 0 => Some(path),
+                _ => None,
+            }
+        })
+        .collect();
 
-    let num_cpus = num_cpus::get();
-    println!("Detected {} CPUs", num_cpus);
+    // Process files in parallel
+    let results: Vec<_> = entries
+        .par_iter()
+        .filter_map(|path| process_file(path.clone()))
+        .collect();
 
-    let results = stream::iter(file_futures)
-        .buffer_unordered(num_cpus * 2) // Adjust buffer size based on CPU count
-        .filter_map(|x| async { x.ok().flatten() })
-        .collect::<Vec<(String, String)>>()
-        .await;
-
+    // Organize results by hash
     let mut hash_map: HashMap<String, Vec<String>> = HashMap::new();
-
     for (hash, path) in results {
         hash_map.entry(hash).or_insert_with(Vec::new).push(path);
     }
 
+    // Collect duplicate files
     let duplicates: Vec<DuplicateFiles> = hash_map
         .into_iter()
         .filter(|(_, paths)| paths.len() > 1)
@@ -73,9 +81,9 @@ async fn find_duplicates(input_dir: &str) -> io::Result<Vec<DuplicateFiles>> {
     Ok(duplicates)
 }
 
+/// Delete duplicate files, keeping only one
 fn delete_duplicates(duplicates: &[DuplicateFiles]) -> io::Result<()> {
     for duplicate in duplicates {
-        // Keep the first file and delete the rest
         for path in &duplicate.paths[1..] {
             fs::remove_file(path)?;
             println!("Deleted: {}", path);
@@ -84,12 +92,11 @@ fn delete_duplicates(duplicates: &[DuplicateFiles]) -> io::Result<()> {
     Ok(())
 }
 
+/// Move duplicate files to a specified directory, keeping only one
 fn move_duplicates(duplicates: &[DuplicateFiles], move_dir: &str) -> io::Result<()> {
     for duplicate in duplicates {
-        // Ensure the target directory exists
         fs::create_dir_all(move_dir)?;
 
-        // Keep the first file and move the rest
         for path in &duplicate.paths[1..] {
             let file_name = Path::new(path).file_name().unwrap();
             let target_path = Path::new(move_dir).join(file_name);
@@ -101,8 +108,7 @@ fn move_duplicates(duplicates: &[DuplicateFiles], move_dir: &str) -> io::Result<
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> io::Result<()> {
+fn main() -> io::Result<()> {
     let matches = Command::new("File Duplicates Finder")
         .version("1.0")
         .author("Anderson Toshiyuki Sasaki <11450334+toshisasaki@users.noreply.github.com>")
@@ -141,7 +147,7 @@ async fn main() -> io::Result<()> {
     let action = matches.get_one::<String>("action").unwrap();
     let move_dir = matches.get_one::<String>("move_dir");
 
-    let duplicates = find_duplicates(input_dir).await?;
+    let duplicates = find_duplicates(input_dir)?;
 
     match action.as_str() {
         "list" => {
